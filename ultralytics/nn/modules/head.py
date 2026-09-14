@@ -433,8 +433,8 @@ class Segment26(Segment):
 class AttrHead:
     """Mixin adding `na` multi-label attribute logits per anchor to a Detect-family head.
 
-    The attribute branch mirrors the classification branch. Inference outputs append the sigmoid attribute
-    probabilities as the last `na` channels, after class scores and any task channels (e.g. mask coefficients).
+    The attribute branch mirrors the classification branch. Inference outputs append the sigmoid attribute probabilities
+    as the last `na` channels, after class scores and any task channels (e.g. mask coefficients).
     """
 
     def _init_attr(self, na: int) -> None:
