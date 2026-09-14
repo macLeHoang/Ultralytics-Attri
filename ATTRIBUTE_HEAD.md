@@ -100,7 +100,7 @@ Rules checked at load time. A file that breaks them is reported as corrupt and s
 - attribute values must be `-1`, `0` or `1`;
 - the usual YOLO checks (normalized coordinates, class < nc, and so on) apply to the part before the attributes.
 
-> **Cache gotcha:** Ultralytics validates `labels/*.cache` by file paths and **total size**, not contents. Flipping an attribute `0 → 1` keeps the file size the same, so the old cache is reused. **Delete `labels/*.cache` after editing attribute values.** Changing the number of attributes K invalidates the cache automatically.
+> **Cache got you:** Ultralytics validates `labels/*.cache` by file paths and **total size**, not contents. Flipping an attribute `0 → 1` keeps the file size the same, so the old cache is reused. **Delete `labels/*.cache` after editing attribute values.** Changing the number of attributes K invalidates the cache automatically.
 
 ---
 
@@ -136,9 +136,9 @@ The training log shows an extra column, `attr_loss`, and `results.csv` / `result
 **Tips**
 
 - `attr_loss` starts around `0.69` (`ln 2`, a 50/50 guess). If it stays near that value, the attribute branch isn't learning, and the usual cause is a **learning rate that is too small**:
-    - For short trainings (< 10,000 iterations), `optimizer=auto` picks AdamW with `lr = 0.01 / (4 + nc)`. That is ~0.0017 for 2 classes but only ~0.00012 for 80 classes.
-    - Measured on this branch with 80 classes: with the auto learning rate, attribute probabilities stayed near 0.5 after 60 epochs on a tiny dataset. With `optimizer=SGD lr0=0.01`, the same head fit the attributes almost perfectly in 150 steps (§11).
-    - If `attr_loss` stays flat, set the optimizer explicitly (`optimizer=SGD lr0=0.01` or `optimizer=AdamW lr0=0.001`), and/or raise `attr` (e.g. `attr=2.0`).
+  - For short trainings (< 10,000 iterations), `optimizer=auto` picks AdamW with `lr = 0.01 / (4 + nc)`. That is ~0.0017 for 2 classes but only ~0.00012 for 80 classes.
+  - Measured on this branch with 80 classes: with the auto learning rate, attribute probabilities stayed near 0.5 after 60 epochs on a tiny dataset. With `optimizer=SGD lr0=0.01`, the same head fit the attributes almost perfectly in 150 steps (§11).
+  - If `attr_loss` stays flat, set the optimizer explicitly (`optimizer=SGD lr0=0.01` or `optimizer=AdamW lr0=0.001`), and/or raise `attr` (e.g. `attr=2.0`).
 - Fine-grained attributes (hair color, clothing) need pixels. Train at a larger `imgsz` if targets are small.
 - Mutually exclusive attributes (`sedan`/`truck`/`bus`) are trained as independent sigmoids. Pick the max within the group at inference if you need exactly one.
 
@@ -172,14 +172,14 @@ How the metrics are computed:
 
 ## 6. Prediction — `Results` API
 
-| Field                                   | Type                           | Notes                                                                                |
-| --------------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------ |
-| `r.attributes`                          | `BaseTensor` (N, K) or `None`  | Sigmoid probabilities. Non-applicable attributes for the box's class are `0`.         |
-| `r.attributes.data`                     | `torch.Tensor` / `np.ndarray`  | Raw values. `.cpu()`, `.numpy()`, `.shape` work.                                     |
-| `r.attr_names`                          | `list[str]`                    | Column names, in `data.yaml` order.                                                  |
-| `r.summary()` / `to_json()` / `to_df()` | per box `"attributes": {...}`  | `{name: probability}` for every attribute.                                           |
-| `r.plot()`                              | image                          | Box label gets the names of attributes with probability > 0.5, e.g. `person 0.91 black_hair short`. |
-| `r[idx]`                                | `Results`                      | Indexing/slicing keeps attributes aligned with boxes and masks.                      |
+| Field                                   | Type                          | Notes                                                                                               |
+| --------------------------------------- | ----------------------------- | --------------------------------------------------------------------------------------------------- |
+| `r.attributes`                          | `BaseTensor` (N, K) or `None` | Sigmoid probabilities. Non-applicable attributes for the box's class are `0`.                       |
+| `r.attributes.data`                     | `torch.Tensor` / `np.ndarray` | Raw values. `.cpu()`, `.numpy()`, `.shape` work.                                                    |
+| `r.attr_names`                          | `list[str]`                   | Column names, in `data.yaml` order.                                                                 |
+| `r.summary()` / `to_json()` / `to_df()` | per box `"attributes": {...}` | `{name: probability}` for every attribute.                                                          |
+| `r.plot()`                              | image                         | Box label gets the names of attributes with probability > 0.5, e.g. `person 0.91 black_hair short`. |
+| `r[idx]`                                | `Results`                     | Indexing/slicing keeps attributes aligned with boxes and masks.                                     |
 
 Example — keep only people with black hair:
 
@@ -202,11 +202,11 @@ YOLO("best.onnx", task="segment")("image.jpg")[0].attributes  # works like .pt
 - The attribute names and applicability mask are written to the export metadata (`attributes`, `attr_mask`), so Ultralytics can predict from exported files with no extra config.
 - Attributes are part of the model graph, already sigmoided, and always come **last**:
 
-| Output                            | Layout per anchor / detection                                                               |
-| --------------------------------- | ------------------------------------------------------------------------------------------- |
-| Raw detect `(B, 4+nc+K, A)`       | `cx, cy, w, h, class scores (nc), attributes (K)`                                           |
-| Raw segment `(B, 4+nc+32+K, A)`   | `cx, cy, w, h, class scores (nc), mask coefs (32), attributes (K)`, plus protos output       |
-| After NMS / NMS-free `(B, N, ·)`  | `x1, y1, x2, y2, conf, cls, [mask coefs (32)], attributes (K)`                              |
+| Output                           | Layout per anchor / detection                                                          |
+| -------------------------------- | -------------------------------------------------------------------------------------- |
+| Raw detect `(B, 4+nc+K, A)`      | `cx, cy, w, h, class scores (nc), attributes (K)`                                      |
+| Raw segment `(B, 4+nc+32+K, A)`  | `cx, cy, w, h, class scores (nc), mask coefs (32), attributes (K)`, plus protos output |
+| After NMS / NMS-free `(B, N, ·)` | `x1, y1, x2, y2, conf, cls, [mask coefs (32)], attributes (K)`                         |
 
 The export log prints the actual output shape. A custom parser such as DeepStream only needs to read the last K channels; no parser is included on this branch.
 
@@ -237,25 +237,25 @@ Why not simply write the same box once per label? The assigner resolves ties bet
 
 ## 9. What changed
 
-| File                                                                  | Change                                                                                                                                                                                                      |
-| --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ultralytics/data/utils.py`                                           | `verify_image_label` removes the trailing K attribute columns before box/segment parsing and validates them. `check_det_dataset` validates `attributes` / `attr_classes` and builds `attr_mask`.            |
-| `ultralytics/data/dataset.py`                                         | Labels store `attributes`. The cache hash includes K. `collate_fn` concatenates attributes.                                                                                                                  |
-| `ultralytics/data/base.py`                                            | The `classes=` filter also filters attributes.                                                                                                                                                              |
-| `ultralytics/data/augment.py`                                         | Attributes follow instances in `Mosaic`, `MixUp`, `CutMix`, `RandomPerspective`, `CopyPaste`, `Albumentations` and `Format` (including the overlap-mask area sort).                                          |
-| `ultralytics/nn/modules/head.py`, `nn/modules/__init__.py`            | New `AttrHead` mixin and the `DetectAttr`, `SegmentAttr`, `Segment26Attr` heads.                                                                                                                             |
-| `ultralytics/nn/tasks.py`                                             | `parse_model` resolves `na` and registers the new heads. `DetectionModel` / `SegmentationModel` accept `na`. `init_criterion` picks the attribute losses.                                                    |
-| `ultralytics/cfg/models/26/yolo26-attr.yaml`, `yolo26-seg-attr.yaml`  | New model configs.                                                                                                                                                                                          |
-| `ultralytics/cfg/models/11/yolo11-attr.yaml`, `yolo11-seg-attr.yaml`  | New model configs.                                                                                                                                                                                          |
-| `ultralytics/utils/loss.py`                                           | New `AttrLoss` mixin, `v8DetectAttrLoss`, `v8SegmentAttrLoss`.                                                                                                                                              |
-| `ultralytics/cfg/default.yaml`, `cfg/__init__.py`                     | New `attr` loss gain (float arg).                                                                                                                                                                           |
-| `ultralytics/models/yolo/detect/train.py`, `segment/train.py`         | Pass K to the model, attach `attributes` / `attr_mask` to the model, and check that data and head match.                                                                                                     |
-| `ultralytics/models/yolo/detect/val.py`                               | NMS uses the real class count when attributes exist, splits attribute channels, matches predictions to ground truth, prints the attribute table.                                                            |
-| `ultralytics/utils/metrics.py`                                        | `DetMetrics` computes attribute AP/P/R/F1, adds `attr_mAP` / `attr_F1` to `results_dict`, and adds `0.1 × attr_mAP` to fitness. Inherited by `SegmentMetrics`; tasks without attributes are unchanged.       |
-| `ultralytics/models/yolo/detect/predict.py`, `segment/predict.py`     | NMS class count, `get_attributes()` (applies `attr_mask`), mask coefficients exclude the attribute channels.                                                                                                |
-| `ultralytics/engine/results.py`                                       | `Results.attributes`, `Results.attr_names`, attribute names in `plot()` labels, `attributes` in `summary()`.                                                                                                |
-| `ultralytics/engine/exporter.py`, `nn/backends/base.py`, `nn/backends/pytorch.py` | Attribute names and mask written to / read from export metadata.                                                                                                                                |
-| `tests/test_attributes.py`                                            | New tests: augmentation alignment (detect + segment) and train → val → predict (YOLO26 detect, YOLO11 segment).                                                                                             |
+| File                                                                              | Change                                                                                                                                                                                                 |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ultralytics/data/utils.py`                                                       | `verify_image_label` removes the trailing K attribute columns before box/segment parsing and validates them. `check_det_dataset` validates `attributes` / `attr_classes` and builds `attr_mask`.       |
+| `ultralytics/data/dataset.py`                                                     | Labels store `attributes`. The cache hash includes K. `collate_fn` concatenates attributes.                                                                                                            |
+| `ultralytics/data/base.py`                                                        | The `classes=` filter also filters attributes.                                                                                                                                                         |
+| `ultralytics/data/augment.py`                                                     | Attributes follow instances in `Mosaic`, `MixUp`, `CutMix`, `RandomPerspective`, `CopyPaste`, `Albumentations` and `Format` (including the overlap-mask area sort).                                    |
+| `ultralytics/nn/modules/head.py`, `nn/modules/__init__.py`                        | New `AttrHead` mixin and the `DetectAttr`, `SegmentAttr`, `Segment26Attr` heads.                                                                                                                       |
+| `ultralytics/nn/tasks.py`                                                         | `parse_model` resolves `na` and registers the new heads. `DetectionModel` / `SegmentationModel` accept `na`. `init_criterion` picks the attribute losses.                                              |
+| `ultralytics/cfg/models/26/yolo26-attr.yaml`, `yolo26-seg-attr.yaml`              | New model configs.                                                                                                                                                                                     |
+| `ultralytics/cfg/models/11/yolo11-attr.yaml`, `yolo11-seg-attr.yaml`              | New model configs.                                                                                                                                                                                     |
+| `ultralytics/utils/loss.py`                                                       | New `AttrLoss` mixin, `v8DetectAttrLoss`, `v8SegmentAttrLoss`.                                                                                                                                         |
+| `ultralytics/cfg/default.yaml`, `cfg/__init__.py`                                 | New `attr` loss gain (float arg).                                                                                                                                                                      |
+| `ultralytics/models/yolo/detect/train.py`, `segment/train.py`                     | Pass K to the model, attach `attributes` / `attr_mask` to the model, and check that data and head match.                                                                                               |
+| `ultralytics/models/yolo/detect/val.py`                                           | NMS uses the real class count when attributes exist, splits attribute channels, matches predictions to ground truth, prints the attribute table.                                                       |
+| `ultralytics/utils/metrics.py`                                                    | `DetMetrics` computes attribute AP/P/R/F1, adds `attr_mAP` / `attr_F1` to `results_dict`, and adds `0.1 × attr_mAP` to fitness. Inherited by `SegmentMetrics`; tasks without attributes are unchanged. |
+| `ultralytics/models/yolo/detect/predict.py`, `segment/predict.py`                 | NMS class count, `get_attributes()` (applies `attr_mask`), mask coefficients exclude the attribute channels.                                                                                           |
+| `ultralytics/engine/results.py`                                                   | `Results.attributes`, `Results.attr_names`, attribute names in `plot()` labels, `attributes` in `summary()`.                                                                                           |
+| `ultralytics/engine/exporter.py`, `nn/backends/base.py`, `nn/backends/pytorch.py` | Attribute names and mask written to / read from export metadata.                                                                                                                                       |
+| `tests/test_attributes.py`                                                        | New tests: augmentation alignment (detect + segment) and train → val → predict (YOLO26 detect, YOLO11 segment).                                                                                        |
 
 Datasets without `attributes` go through the same code paths as before.
 
