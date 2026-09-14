@@ -96,16 +96,19 @@ class SegmentationPredictor(DetectionPredictor):
         Returns:
             (Results): Result object containing the original image, image path, class names, bounding boxes, and masks.
         """
+        coefficients = pred[:, 6 : pred.shape[1] - len(getattr(self.model, "attributes", None) or [])]
         if pred.shape[0] == 0:  # save empty boxes
             masks = None
         elif self.args.retina_masks:
             pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], orig_img.shape)
-            masks = ops.process_mask_native(proto, pred[:, 6:], pred[:, :4], orig_img.shape[:2])  # NHW
+            masks = ops.process_mask_native(proto, coefficients, pred[:, :4], orig_img.shape[:2])  # NHW
         else:
-            masks = ops.process_mask(proto, pred[:, 6:], pred[:, :4], img.shape[2:], upsample=True)  # NHW
+            masks = ops.process_mask(proto, coefficients, pred[:, :4], img.shape[2:], upsample=True)  # NHW
             pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], orig_img.shape)
         if masks is not None:
             keep = masks.amax((-2, -1)) > 0  # only keep predictions with masks
             if not (all(keep) or getattr(self, "_feats", None) is not None):  # skip filter if native ReID enabled
                 pred, masks = pred[keep], masks[keep]  # indexing is slow
-        return Results(orig_img, path=img_path, names=self.model.names, boxes=pred[:, :6], masks=masks)
+        return Results(
+            orig_img, path=img_path, names=self.model.names, boxes=pred[:, :6], masks=masks, **self.get_attributes(pred)
+        )

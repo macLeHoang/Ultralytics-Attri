@@ -766,6 +766,8 @@ class Mosaic(BaseMixTransform):
         final_labels["instances"].clip(imgsz, imgsz, preserve_obb=self.preserve_obb)
         good = final_labels["instances"].remove_zero_area_boxes()
         final_labels["cls"] = final_labels["cls"][good]
+        if "attributes" in mosaic_labels[0]:
+            final_labels["attributes"] = np.concatenate([x["attributes"] for x in mosaic_labels], 0)[good]
         if "texts" in mosaic_labels[0]:
             final_labels["texts"] = mosaic_labels[0]["texts"]
         return final_labels
@@ -848,6 +850,8 @@ class MixUp(BaseMixTransform):
         labels2 = labels["mix_labels"][0]
         labels["instances"] = Instances.concatenate([labels["instances"], labels2["instances"]], axis=0)
         labels["cls"] = np.concatenate([labels["cls"], labels2["cls"]], 0)
+        if "attributes" in labels:
+            labels["attributes"] = np.concatenate([labels["attributes"], labels2["attributes"]], 0)
         return labels
 
     def apply_semantic(self, labels: dict[str, Any], params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1020,6 +1024,8 @@ class CutMix(BaseMixTransform):
         instances2.add_padding(x1, y1)
 
         labels["cls"] = np.concatenate([labels["cls"], labels2["cls"][indexes2]], axis=0)
+        if "attributes" in labels:
+            labels["attributes"] = np.concatenate([labels["attributes"], labels2["attributes"][indexes2]], axis=0)
         labels["instances"] = Instances.concatenate([labels["instances"], instances2], axis=0)
         return labels
 
@@ -1232,6 +1238,8 @@ class RandomPerspective(BaseTransform):
         )
         labels["instances"] = new_instances[i]
         labels["cls"] = cls[i]
+        if "attributes" in labels:
+            labels["attributes"] = labels["attributes"][i]
         return labels
 
     def apply_bboxes(self, bboxes: np.ndarray, M: np.ndarray) -> np.ndarray:
@@ -1968,6 +1976,7 @@ class CopyPaste(BaseMixTransform):
         params["selected"] = selected
         params["im_new"] = im_new
         params["labels2_cls"] = labels2.get("cls")
+        params["labels2_attributes"] = labels2.get("attributes")
         params["labels2_img"] = labels2.get("img")
         return params
 
@@ -2020,6 +2029,9 @@ class CopyPaste(BaseMixTransform):
         if len(selected):
             cls = np.concatenate((cls, (labels2_cls if labels2_cls is not None else cls)[selected]), axis=0)
             instances = Instances.concatenate([instances, instances2[selected]], axis=0)
+            if "attributes" in labels:
+                attrs, attrs2 = labels["attributes"], params.get("labels2_attributes")
+                labels["attributes"] = np.concatenate((attrs, (attrs2 if attrs2 is not None else attrs)[selected]), 0)
 
         labels["cls"] = cls
         labels["instances"] = instances
@@ -2254,6 +2266,8 @@ class Albumentations(BaseTransform):
                     instances.update(np.array(new["bboxes"], dtype=np.float32).reshape(-1, 4), keypoints=keypoints)
                 labels["img"] = new["image"]
                 labels["cls"] = cls[i].reshape(-1, 1)
+                if "attributes" in labels:
+                    labels["attributes"] = labels["attributes"][i]
                 labels["instances"] = instances
                 if mask is not None:
                     labels[key] = new["mask"]
@@ -2392,7 +2406,11 @@ class Format(BaseTransform):
                     f"mask_ratio={self.mask_ratio} downsamples imgsz={(h, w)} masks to zero size; use mask_ratio <= {min(h, w)}"
                 )
             if nl:
-                masks, instances, cls = self._format_segments(instances, cls, w, h)
+                masks, instances, cls, attributes = self._format_segments(
+                    instances, cls, w, h, labels.get("attributes")
+                )
+                if attributes is not None:
+                    labels["attributes"] = attributes
                 masks = torch.from_numpy(masks)
                 cls_tensor = torch.from_numpy(cls.squeeze(1))
                 if not masks.shape[0] or not cls_tensor.numel():
@@ -2416,6 +2434,9 @@ class Format(BaseTransform):
             labels["sem_masks"] = sem_masks.float()
         labels["cls"] = torch.from_numpy(cls) if nl else torch.zeros(nl, 1)
         labels["bboxes"] = torch.from_numpy(instances.bboxes) if nl else torch.zeros((nl, 4))
+        if "attributes" in labels:
+            assert len(labels["attributes"]) == nl, f"{len(labels['attributes'])} attribute rows for {nl} instances"
+            labels["attributes"] = torch.from_numpy(labels["attributes"])
         if self.return_keypoint:
             labels["keypoints"] = (
                 torch.empty(0, 3) if instances.keypoints is None else torch.from_numpy(instances.keypoints)
@@ -2465,8 +2486,8 @@ class Format(BaseTransform):
         return img
 
     def _format_segments(
-        self, instances: Instances, cls: np.ndarray, w: int, h: int
-    ) -> tuple[np.ndarray, Instances, np.ndarray]:
+        self, instances: Instances, cls: np.ndarray, w: int, h: int, attributes: np.ndarray | None = None
+    ) -> tuple[np.ndarray, Instances, np.ndarray, np.ndarray | None]:
         """Convert polygon segments to bitmap masks.
 
         Args:
@@ -2474,11 +2495,13 @@ class Format(BaseTransform):
             cls (np.ndarray): Class labels for each instance.
             w (int): Width of the image.
             h (int): Height of the image.
+            attributes (np.ndarray, optional): Per-instance attribute labels with shape (N, na).
 
         Returns:
             masks (np.ndarray): Bitmap masks with shape (N, H, W) or (1, H, W) if mask_overlap is True.
             instances (Instances): Updated instances object with sorted segments if mask_overlap is True.
             cls (np.ndarray): Updated class labels, sorted if mask_overlap is True.
+            attributes (np.ndarray | None): Updated attribute labels, sorted if mask_overlap is True.
 
         Notes:
             - If self.mask_overlap is True, masks are overlapped and sorted by area.
@@ -2491,10 +2514,11 @@ class Format(BaseTransform):
             masks = masks[None]  # (640, 640) -> (1, 640, 640)
             instances = instances[sorted_idx]
             cls = cls[sorted_idx]
+            attributes = attributes if attributes is None else attributes[sorted_idx]
         else:
             masks = polygons2masks((h, w), segments, color=1, downsample_ratio=self.mask_ratio)
 
-        return masks, instances, cls
+        return masks, instances, cls, attributes
 
 
 class SemanticFormat(Format):

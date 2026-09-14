@@ -20,6 +20,7 @@ class DetectionPredictor(BasePredictor):
         postprocess: Process raw model predictions into detection results.
         construct_results: Build Results objects from processed predictions.
         construct_result: Create a single Result object from a prediction.
+        get_attributes: Extract per-box attribute probabilities for Results.
         get_obj_feats: Extract object features from the feature maps.
 
     Examples:
@@ -51,6 +52,8 @@ class DetectionPredictor(BasePredictor):
             >>> processed_results = predictor.postprocess(preds, img, orig_imgs)
         """
         save_feats = getattr(self, "_feats", None) is not None
+        # Class count separates class scores from trailing channels (masks, keypoints, angle, attributes)
+        nc = len(self.model.names) if self.args.task != "detect" or getattr(self.model, "attributes", None) else 0
         preds = nms.non_max_suppression(
             preds,
             self.args.conf,
@@ -58,7 +61,7 @@ class DetectionPredictor(BasePredictor):
             self.args.classes,
             self.args.agnostic_nms,
             max_det=self.args.max_det,
-            nc=0 if self.args.task == "detect" else len(self.model.names),
+            nc=nc,
             end2end=getattr(self.model, "end2end", False),
             rotated=self.args.task == "obb",
             return_idxs=save_feats,
@@ -119,4 +122,21 @@ class DetectionPredictor(BasePredictor):
             (Results): Results object containing the original image, image path, class names, and scaled bounding boxes.
         """
         pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], orig_img.shape)
-        return Results(orig_img, path=img_path, names=self.model.names, boxes=pred[:, :6])
+        return Results(orig_img, path=img_path, names=self.model.names, boxes=pred[:, :6], **self.get_attributes(pred))
+
+    def get_attributes(self, pred):
+        """Return Results kwargs with per-box attribute probabilities from the last prediction channels.
+
+        Attributes not applicable to a box's class (data.yaml 'attr_classes') are reported as 0.
+
+        Args:
+            pred (torch.Tensor): Predictions (N, 6 + extra) whose last `na` channels are attribute probabilities.
+
+        Returns:
+            (dict): `attributes` and `attr_names` for Results, or an empty dict for models without attributes.
+        """
+        names = getattr(self.model, "attributes", None)
+        if not names:
+            return {}
+        mask = pred.new_tensor(self.model.attr_mask)[pred[:, 5].long()]  # (N, na) applicability per box class
+        return {"attributes": pred[:, pred.shape[1] - len(names) :] * mask, "attr_names": names}

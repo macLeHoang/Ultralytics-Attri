@@ -1132,6 +1132,8 @@ class DetMetrics(SimpleClass, DataExportMixin):
         self.stats = {"tp": [], "conf": [], "pred_cls": [], "target_cls": [], "target_img": []}
         self.nt_per_class = None
         self.nt_per_image = None
+        self.attr_mask = None  # (nc, na) attribute applicability, set with 'attr_*' stats for per-box attributes
+        self.attr_results = None  # per-attribute (p, r, f1, ap, attribute index) after process()
 
     def update_stats(self, stat: dict[str, Any]) -> None:
         """Update statistics by appending new values to existing stat collections.
@@ -1173,6 +1175,15 @@ class DetMetrics(SimpleClass, DataExportMixin):
         self.box.update(results)
         self.nt_per_class = np.bincount(stats["target_cls"].astype(int), minlength=len(self.names))
         self.nt_per_image = np.bincount(stats["target_img"].astype(int), minlength=len(self.names))
+        if "attr_prob" in stats:  # per-attribute AP over predictions matched to ground truth, ignoring -1 and N/A
+            valid = (stats["attr_target"] >= 0) & np.asarray(self.attr_mask, bool)[stats["attr_cls"].astype(int)]
+            k = np.nonzero(valid)[1]  # attribute index of each valid entry
+            tp = stats["attr_target"][valid][:, None] == 1
+            self.attr_results = (
+                ap_per_class(tp, stats["attr_prob"][valid], k, k[tp[:, 0]])[2:7]
+                if tp.any()
+                else (np.zeros(0), np.zeros(0), np.zeros(0), np.zeros((0, 1)), np.zeros(0, dtype=int))
+            )
         return stats
 
     def clear_stats(self):
@@ -1204,8 +1215,15 @@ class DetMetrics(SimpleClass, DataExportMixin):
 
     @property
     def fitness(self) -> float:
-        """Return the fitness of box object."""
-        return self.box.fitness()
+        """Return the fitness of box object, plus 0.1 x attribute mAP when per-box attributes are evaluated."""
+        return self.box.fitness() + 0.1 * self.attr_map
+
+    @property
+    def attr_map(self) -> float:
+        """Return the mean average precision over per-box attributes, or 0.0 when none are evaluated."""
+        return (
+            float(self.attr_results[3].mean()) if self.attr_results is not None and len(self.attr_results[3]) else 0.0
+        )
 
     @property
     def ap_class_index(self) -> list:
@@ -1217,7 +1235,12 @@ class DetMetrics(SimpleClass, DataExportMixin):
         """Return dictionary of computed performance metrics and statistics."""
         keys = [*self.keys, "fitness"]
         values = ((float(x) if hasattr(x, "item") else x) for x in ([*self.mean_results(), self.fitness]))
-        return dict(zip(keys, values))
+        results = dict(zip(keys, values))
+        if self.attr_results is not None:
+            f1 = self.attr_results[2]
+            results["metrics/attr_mAP(A)"] = self.attr_map
+            results["metrics/attr_F1(A)"] = float(f1.mean()) if len(f1) else 0.0
+        return results
 
     @property
     def curves(self) -> list[str]:

@@ -65,6 +65,8 @@ class PyTorchBackend(BaseBackend):
         # Extract model attributes
         if hasattr(model, "kpt_shape"):
             self.kpt_shape = model.kpt_shape
+        if hasattr(model, "attributes"):
+            self.attributes, self.attr_mask = model.attributes, model.attr_mask
         self.stride = max(int(model.stride.max()), 32) if hasattr(model, "stride") else 32
         self.names = model.module.names if hasattr(model, "module") else getattr(model, "names", {})
         self.channels = model.yaml.get("channels", 3) if hasattr(model, "yaml") else 3

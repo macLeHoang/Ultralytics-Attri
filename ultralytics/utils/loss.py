@@ -651,6 +651,61 @@ class v8SegmentationLoss(v8DetectionLoss):
         return loss / fg_mask.sum()
 
 
+class AttrLoss:
+    """Mixin adding a masked BCE loss on per-box attribute logits to a detection-family loss.
+
+    Attribute targets of -1 are ignored, as are attributes not applicable to the assigned ground-truth class according
+    to the model's (nc, na) `attr_mask`.
+    """
+
+    def __init__(self, model: torch.nn.Module, tal_topk: int = 10, tal_topk2: int | None = None):
+        """Initialize the parent loss and the attribute applicability mask."""
+        super().__init__(model, tal_topk, tal_topk2)
+        mask = getattr(model, "attr_mask", None) or [[1] * model.model[-1].na] * self.nc  # default: all applicable
+        self.attr_mask = torch.tensor(mask, dtype=torch.bool, device=self.device)  # (nc, na)
+
+    def get_assigned_targets_and_loss(self, preds: dict[str, torch.Tensor], batch: dict[str, Any]) -> tuple:
+        """Run the parent assignment and keep foreground anchors and their target indices for the attribute loss."""
+        out = super().get_assigned_targets_and_loss(preds, batch)
+        self.assigned = out[0][:2]  # fg_mask, target_gt_idx
+        return out
+
+    def loss(
+        self, preds: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Calculate the parent loss and append the attribute loss."""
+        loss, loss_items = super().loss(preds, batch)
+        fg_mask, target_gt_idx = self.assigned
+        pred = preds["attrs"].permute(0, 2, 1)  # (b, anchors, na)
+        batch_size = pred.shape[0]
+        attr_loss = pred[..., :0].sum()  # WARNING: prevents Multi-GPU DDP 'unused gradient' errors, do not remove
+        if fg_mask.any():
+            # Pad per-image targets in collate order, matching the ground-truth indices used by the assigner
+            batch_idx = batch["batch_idx"].to(self.device).long()
+            counts = torch.bincount(batch_idx, minlength=batch_size)
+            within = torch.arange(len(batch_idx), device=self.device) - (counts.cumsum(0) - counts)[batch_idx]
+            attrs = pred.new_full((batch_size, int(counts.max()), pred.shape[-1]), -1.0)
+            cls = torch.zeros(attrs.shape[:2], dtype=torch.long, device=self.device)
+            attrs[batch_idx, within] = batch["attributes"].to(self.device, attrs.dtype)
+            cls[batch_idx, within] = batch["cls"].view(-1).to(self.device).long()
+
+            b = torch.arange(batch_size, device=self.device)[:, None]
+            target = attrs[b, target_gt_idx]  # (b, anchors, na)
+            valid = (target >= 0) & self.attr_mask[cls[b, target_gt_idx]] & fg_mask[..., None].bool()
+            bce = F.binary_cross_entropy_with_logits(pred, target.clamp(min=0), reduction="none")
+            attr_loss = attr_loss + (bce * valid).sum() / valid.sum().clamp(min=1)
+        attr_loss = attr_loss * self.hyp.attr  # attribute gain
+        return torch.cat([loss, (attr_loss * batch_size).view(1)]), {**loss_items, "attr_loss": attr_loss.detach()}
+
+
+class v8DetectAttrLoss(AttrLoss, v8DetectionLoss):
+    """Criterion class for computing training losses for detection with per-box attributes."""
+
+
+class v8SegmentAttrLoss(AttrLoss, v8SegmentationLoss):
+    """Criterion class for computing training losses for segmentation with per-instance attributes."""
+
+
 class v8PoseLoss(v8DetectionLoss):
     """Criterion class for computing training losses for YOLOv8 pose estimation."""
 

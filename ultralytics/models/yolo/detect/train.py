@@ -145,6 +145,14 @@ class DetectionTrainer(BaseTrainer):
         self.model.nc = self.data["nc"]  # attach number of classes to model
         self.model.names = self.data["names"]  # attach class names to model
         self.model.args = self.args  # attach hyperparameters to model
+        model = getattr(self.model, "student_model", self.model)  # distillation builds the loss on the student
+        if bool(self.data.get("attributes")) != hasattr(model.model[-1], "na"):  # only attribute heads define `na`
+            raise ValueError(
+                "data.yaml 'attributes' require a model with an attribute head and vice versa, i.e. "
+                "model=yolo26n-attr.yaml or model=yolo26n-seg-attr.yaml with pretrained=yolo26n.pt or yolo26n-seg.pt"
+            )
+        if self.data.get("attributes"):
+            model.attributes, model.attr_mask = self.data["attributes"], self.data["attr_mask"]
 
     def set_model_names_for_load(self, model):
         """Set target dataset names before loading weights so cls heads can remap by name."""
@@ -195,7 +203,13 @@ class DetectionTrainer(BaseTrainer):
             (DetectionModel): YOLO detection model.
         """
         model = self.set_model_names_for_load(
-            DetectionModel(cfg, nc=self.data["nc"], ch=self.data["channels"], verbose=verbose and RANK == -1)
+            DetectionModel(
+                cfg,
+                nc=self.data["nc"],
+                ch=self.data["channels"],
+                verbose=verbose and RANK == -1,
+                na=len(self.data.get("attributes") or []),
+            )
         )
         if weights:
             model.load(weights)

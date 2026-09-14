@@ -257,6 +257,8 @@ class Results(SimpleClass, DataExportMixin):
         speed: dict[str, float] | None = None,
         semantic_mask: torch.Tensor | None = None,
         depth: torch.Tensor | None = None,
+        attributes: torch.Tensor | None = None,
+        attr_names: list[str] | None = None,
     ) -> None:
         """Initialize the Results class for storing and manipulating inference results.
 
@@ -272,6 +274,8 @@ class Results(SimpleClass, DataExportMixin):
             semantic_mask (torch.Tensor | None): A 2D tensor of class IDs for semantic segmentation results.
             depth (torch.Tensor | None): A 2D float tensor of per-pixel depth values (H, W).
             speed (dict | None): A dictionary containing preprocess, inference, and postprocess speeds (ms/image).
+            attributes (torch.Tensor | None): A 2D tensor (N, na) of per-box attribute probabilities.
+            attr_names (list[str] | None): Attribute names matching the columns of `attributes`.
 
         Notes:
             For the default pose model, keypoint indices for human body pose estimation are:
@@ -289,11 +293,13 @@ class Results(SimpleClass, DataExportMixin):
         self.obb = OBB(obb, self.orig_shape) if obb is not None else None
         self.semantic_mask = SemanticMask(semantic_mask, self.orig_shape) if semantic_mask is not None else None
         self.depth = DepthMap(depth, self.orig_shape) if depth is not None else None
+        self.attributes = BaseTensor(attributes, self.orig_shape) if attributes is not None else None
         self.speed = speed if speed is not None else {"preprocess": None, "inference": None, "postprocess": None}
         self.names = names
+        self.attr_names = attr_names
         self.path = path
         self.save_dir = None
-        self._keys = "boxes", "masks", "probs", "keypoints", "obb", "semantic_mask", "depth"
+        self._keys = "boxes", "masks", "probs", "keypoints", "obb", "semantic_mask", "depth", "attributes"
 
     def __getitem__(self, idx):
         """Return a Results object for a specific index of inference results.
@@ -479,7 +485,7 @@ class Results(SimpleClass, DataExportMixin):
             >>> new_result = results[0].new()
         """
         result = Results(orig_img=self.orig_img, path=self.path, names=self.names, speed=self.speed)
-        result.save_dir = self.save_dir
+        result.save_dir, result.attr_names = self.save_dir, self.attr_names
         return result
 
     def plot(
@@ -572,6 +578,9 @@ class Results(SimpleClass, DataExportMixin):
                 d_conf, id = float(d.conf.item()) if conf else None, int(d.id.item()) if d.is_track else None
                 name = ("" if id is None else f"id:{id} ") + names[c]
                 label = (f"{name} {d_conf:.2f}" if conf else name) if labels else (f"{d_conf:.2f}" if conf else None)
+                if labels and self.attributes is not None:  # append attribute names with probability > 0.5
+                    probs = self.attributes.data[len(pred_boxes) - 1 - i].tolist()
+                    label += "".join(f" {a}" for a, p in zip(self.attr_names, probs) if p > 0.5)
                 box = d.xyxyxyxy.squeeze() if is_obb else d.xyxy.squeeze()
                 annotator.box_label(
                     box,
@@ -922,6 +931,9 @@ class Results(SimpleClass, DataExportMixin):
                 }
                 if kpt.has_visible:
                     result["keypoints"]["visible"] = k[:, 2].astype(float).round(decimals).tolist()
+            if self.attributes is not None:
+                probs = self.attributes.data[i].tolist()
+                result["attributes"] = {a: round(float(p), decimals) for a, p in zip(self.attr_names, probs)}
             results.append(result)
 
         return results

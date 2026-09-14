@@ -25,9 +25,12 @@ __all__ = (
     "Classify",
     "Depth",
     "Detect",
+    "DetectAttr",
     "Pose",
     "RTDETRDecoder",
     "Segment",
+    "Segment26Attr",
+    "SegmentAttr",
     "SemanticSegment",
     "YOLOEDetect",
     "YOLOESegment",
@@ -425,6 +428,72 @@ class Segment26(Segment):
         super().fuse()
         if hasattr(self.proto, "fuse"):
             self.proto.fuse()
+
+
+class AttrHead:
+    """Mixin adding `na` multi-label attribute logits per anchor to a Detect-family head.
+
+    The attribute branch mirrors the classification branch. Inference outputs append the sigmoid attribute
+    probabilities as the last `na` channels, after class scores and any task channels (e.g. mask coefficients).
+    """
+
+    def _init_attr(self, na: int) -> None:
+        """Build the attribute branch as a copy of the classification branch with `na` output channels."""
+        self.na = na  # number of attributes
+        self.cv5 = copy.deepcopy(self.cv3)
+        for m in self.cv5:
+            m[-1] = nn.Conv2d(m[-1].in_channels, na, 1)
+        if getattr(self, "one2one_cv3", None) is not None:
+            self.one2one_cv5 = copy.deepcopy(self.cv5)
+
+    @property
+    def one2many(self):
+        """Returns the one-to-many head components including the attribute branch."""
+        return {**super().one2many, "attr_head": self.cv5}
+
+    @property
+    def one2one(self):
+        """Returns the one-to-one head components including the attribute branch."""
+        return {**super().one2one, "attr_head": self.one2one_cv5}
+
+    def forward_head(self, x: list[torch.Tensor], attr_head: torch.nn.Module = None, **kwargs) -> dict:
+        """Return parent head predictions with per-anchor attribute logits of shape (bs, na, anchors)."""
+        preds = super().forward_head(x, **kwargs)
+        if attr_head is not None and preds:
+            bs = x[0].shape[0]  # batch size
+            preds["attrs"] = torch.cat([attr_head[i](x[i]).view(bs, self.na, -1) for i in range(self.nl)], 2)
+        return preds
+
+    def _inference(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Decode parent predictions and append attribute probabilities."""
+        return torch.cat([super()._inference(x), x["attrs"].sigmoid()], 1)
+
+
+class DetectAttr(AttrHead, Detect):
+    """YOLO Detect head with per-box multi-label attributes."""
+
+    def __init__(self, nc: int = 80, na: int = 1, reg_max=16, end2end=False, ch: tuple = ()):
+        """Initialize the detection head with `nc` classes and `na` attributes."""
+        super().__init__(nc, reg_max, end2end, ch)
+        self._init_attr(na)
+
+
+class SegmentAttr(AttrHead, Segment):
+    """YOLO Segment head with per-instance multi-label attributes."""
+
+    def __init__(self, nc: int = 80, nm: int = 32, npr: int = 256, na: int = 1, reg_max=16, end2end=False, ch=()):
+        """Initialize the segmentation head with `nc` classes, `nm` masks, `npr` protos and `na` attributes."""
+        super().__init__(nc, nm, npr, reg_max, end2end, ch)
+        self._init_attr(na)
+
+
+class Segment26Attr(AttrHead, Segment26):
+    """YOLO26 Segment head with per-instance multi-label attributes."""
+
+    def __init__(self, nc: int = 80, nm: int = 32, npr: int = 256, na: int = 1, reg_max=16, end2end=False, ch=()):
+        """Initialize the YOLO26 segmentation head with `nc` classes, `nm` masks, `npr` protos and `na` attributes."""
+        super().__init__(nc, nm, npr, reg_max, end2end, ch)
+        self._init_attr(na)
 
 
 class OBB(Detect):

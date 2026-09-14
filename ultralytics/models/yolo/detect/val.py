@@ -144,6 +144,10 @@ class DetectionValidator(BaseValidator):
         if self.build_gdict:
             self.gdict = {"images": [], "annotations": [], "categories": [{"id": x} for x in self.class_map]}
         self.metrics.names = model.names
+        self.attr_names = getattr(model, "attributes", None) or []  # per-box attributes, last len(attr_names) channels
+        if self.attr_names:
+            self.metrics.attr_mask = model.attr_mask
+            self.metrics.stats.update(attr_prob=[], attr_target=[], attr_cls=[])
         self.metrics.clear_stats()
         self.metrics.clear_image_metrics()
         self.confusion_matrix = ConfusionMatrix(names=model.names, save_matches=self.args.plots and self.args.visualize)
@@ -162,18 +166,28 @@ class DetectionValidator(BaseValidator):
             (list[dict[str, torch.Tensor]]): Processed predictions after NMS, where each dict contains 'bboxes', 'conf',
                 'cls', and 'extra' tensors.
         """
+        na = len(self.attr_names)
         outputs = nms.non_max_suppression(
             preds,
             self.args.conf,
             self.args.iou,
-            nc=0 if self.args.task == "detect" else self.nc,
+            nc=0 if self.args.task == "detect" and not na else self.nc,
             multi_label=True,
             agnostic=self.args.single_cls or self.args.agnostic_nms,
             max_det=self.args.max_det,
             end2end=self.end2end,
             rotated=self.args.task == "obb",
         )
-        return [{"bboxes": x[:, :4], "conf": x[:, 4], "cls": x[:, 5], "extra": x[:, 6:]} for x in outputs]
+        return [
+            {
+                "bboxes": x[:, :4],
+                "conf": x[:, 4],
+                "cls": x[:, 5],
+                "extra": x[:, 6 : x.shape[1] - na],
+                **({"attributes": x[:, x.shape[1] - na :]} if na else {}),
+            }
+            for x in outputs
+        ]
 
     def _prepare_batch(self, si: int, batch: dict[str, Any]) -> dict[str, Any]:
         """Prepare a batch of images and annotations for validation.
@@ -200,6 +214,7 @@ class DetectionValidator(BaseValidator):
             "imgsz": imgsz,
             "ratio_pad": ratio_pad,
             "im_file": batch["im_file"][si],
+            **({"attributes": batch["attributes"][idx]} if "attributes" in batch else {}),
         }
 
     def _prepare_pred(self, pred: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -256,6 +271,7 @@ class DetectionValidator(BaseValidator):
                     "conf": np.zeros(0) if no_pred else predn["conf"].cpu().numpy(),
                     "pred_cls": np.zeros(0) if no_pred else predn["cls"].cpu().numpy(),
                     "im_name": Path(pbatch["im_file"]).name,
+                    **(self._match_attributes(predn, pbatch) if self.attr_names else {}),
                 }
             )
             if self.args.plots:
@@ -360,6 +376,13 @@ class DetectionValidator(BaseValidator):
         LOGGER.info(pf % ("all", self.seen, self.metrics.nt_per_class.sum(), *self.metrics.mean_results()))
         if self.metrics.nt_per_class.sum() == 0:
             LOGGER.warning(f"no labels found in {self.args.task} set, cannot compute metrics without labels")
+        if self.metrics.attr_results is not None:  # per-box attributes on predictions matched to ground truth
+            p, r, f1, ap, index = self.metrics.attr_results
+            LOGGER.info(("%22s" + "%11s" * 4) % ("Attribute", "P", "R", "F1", "AP"))
+            LOGGER.info(("%22s" + "%11.3g" * 4) % ("all", *(x.mean() if len(x) else 0.0 for x in (p, r, f1, ap))))
+            if self.args.verbose and not self.training:
+                for i, k in enumerate(index):
+                    LOGGER.info(("%22s" + "%11.3g" * 4) % (self.attr_names[k], p[i], r[i], f1[i], ap[i, 0]))
 
         # Print results per class
         if self.args.verbose and not self.training and self.nc > 1:
@@ -389,6 +412,35 @@ class DetectionValidator(BaseValidator):
             return {"tp": np.zeros((preds["cls"].shape[0], self.niou), dtype=bool)}
         iou = box_iou(batch["bboxes"], preds["bboxes"])
         return {"tp": self.match_predictions(preds["cls"], batch["cls"], iou).cpu().numpy()}
+
+    def _match_attributes(self, preds: dict[str, torch.Tensor], batch: dict[str, Any]) -> dict[str, np.ndarray]:
+        """Pair each ground truth with its highest-confidence same-class prediction at IoU >= 0.5 for attribute stats.
+
+        Args:
+            preds (dict[str, torch.Tensor]): Predictions with 'bboxes', 'conf', 'cls' and 'attributes' keys.
+            batch (dict[str, Any]): Ground truth with 'bboxes', 'cls' and 'attributes' keys.
+
+        Returns:
+            (dict[str, np.ndarray]): Matched predicted attribute probabilities, target attributes and target classes.
+        """
+        na = len(self.attr_names)
+        gt = pred = np.zeros(0, dtype=int)
+        if len(batch["cls"]) and len(preds["cls"]):
+            iou = box_iou(batch["bboxes"], preds["bboxes"]) * (batch["cls"][:, None] == preds["cls"][None])
+            iou = iou.cpu().numpy()
+            gt, pred = np.nonzero(iou >= 0.5)
+            rank = np.argsort(np.argsort(-preds["conf"].cpu().numpy()))  # 0 = most confident prediction
+            order = np.argsort(rank[pred] + 1 - iou[gt, pred])  # confidence first, then best IoU
+            gt, pred = gt[order], pred[order]
+            i = np.sort(np.unique(pred, return_index=True)[1])  # one ground truth per prediction, keeping order
+            gt, pred = gt[i], pred[i]
+            i = np.unique(gt, return_index=True)[1]  # one prediction per ground truth
+            gt, pred = gt[i], pred[i]
+        return {
+            "attr_prob": preds["attributes"][pred].cpu().numpy() if len(pred) else np.zeros((0, na)),
+            "attr_target": batch["attributes"][gt].cpu().numpy() if len(gt) else np.zeros((0, na)),
+            "attr_cls": batch["cls"][gt].cpu().numpy() if len(gt) else np.zeros(0),
+        }
 
     def build_dataset(self, img_path: str, mode: str = "val", batch: int | None = None) -> torch.utils.data.Dataset:
         """Build YOLO Dataset.

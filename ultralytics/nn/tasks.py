@@ -50,6 +50,7 @@ from ultralytics.nn.modules import (
     ConvTranspose,
     Depth,
     Detect,
+    DetectAttr,
     DWConv,
     DWConvTranspose2d,
     Focus,
@@ -71,6 +72,8 @@ from ultralytics.nn.modules import (
     SCDown,
     Segment,
     Segment26,
+    Segment26Attr,
+    SegmentAttr,
     SemanticSegment,
     TorchVision,
     WorldDetect,
@@ -97,10 +100,12 @@ from ultralytics.utils.loss import (
     PoseLoss26,
     SemanticSegmentationLoss,
     v8ClassificationLoss,
+    v8DetectAttrLoss,
     v8DetectionLoss,
     v8OBBLoss,
     v8PoseLoss,
     v8SegmentationLoss,
+    v8SegmentAttrLoss,
 )
 from ultralytics.utils.ops import make_divisible
 from ultralytics.utils.patches import torch_load
@@ -424,7 +429,7 @@ class BaseModel(torch.nn.Module):
         raise NotImplementedError("compute_loss() needs to be implemented by task heads")
 
 
-def _initialize_yolo_model(model, cfg, ch, nc, verbose):
+def _initialize_yolo_model(model, cfg, ch, nc, verbose, na=None):
     """Initialize common YOLO model attributes from a YAML config."""
     model.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)  # cfg dict
     if model.yaml["backbone"][0][2] == "Silence":
@@ -438,6 +443,9 @@ def _initialize_yolo_model(model, cfg, ch, nc, verbose):
     if nc and nc != model.yaml["nc"]:
         LOGGER.info(f"Overriding model.yaml nc={model.yaml['nc']} with nc={nc}")
         model.yaml["nc"] = nc  # override YAML value
+    if na and na != model.yaml.get("na"):
+        LOGGER.info(f"Overriding model.yaml na={model.yaml.get('na')} with na={na}")
+        model.yaml["na"] = na  # number of per-box attributes
     model.model, model.save = parse_model(deepcopy(model.yaml), ch=ch, verbose=verbose)  # model, savelist
     model.names = {i: f"{i}" for i in range(model.yaml["nc"])}  # default names dict
     model.inplace = model.yaml.get("inplace", True)
@@ -471,7 +479,7 @@ class DetectionModel(BaseModel):
         >>> results = model.predict(image_tensor)
     """
 
-    def __init__(self, cfg="yolo26n.yaml", ch=3, nc=None, verbose=True):
+    def __init__(self, cfg="yolo26n.yaml", ch=3, nc=None, verbose=True, na=None):
         """Initialize the YOLO detection model with the given config and parameters.
 
         Args:
@@ -479,9 +487,10 @@ class DetectionModel(BaseModel):
             ch (int): Number of input channels.
             nc (int, optional): Number of classes.
             verbose (bool): Whether to display model information.
+            na (int, optional): Number of per-box attributes for attribute heads.
         """
         super().__init__()
-        _initialize_yolo_model(self, cfg, ch, nc, verbose)
+        _initialize_yolo_model(self, cfg, ch, nc, verbose, na)
 
         # Build strides
         m = self.model[-1]  # Detect()
@@ -601,7 +610,8 @@ class DetectionModel(BaseModel):
 
     def init_criterion(self):
         """Initialize the loss criterion for the DetectionModel."""
-        return E2ELoss(self) if getattr(self.model[-1], "one2one_cv2", None) is not None else v8DetectionLoss(self)
+        loss = v8DetectAttrLoss if isinstance(self.model[-1], DetectAttr) else v8DetectionLoss
+        return E2ELoss(self, loss) if getattr(self.model[-1], "one2one_cv2", None) is not None else loss(self)
 
 
 class OBBModel(DetectionModel):
@@ -652,7 +662,7 @@ class SegmentationModel(DetectionModel):
         >>> results = model.predict(image_tensor)
     """
 
-    def __init__(self, cfg="yolo26n-seg.yaml", ch=3, nc=None, verbose=True):
+    def __init__(self, cfg="yolo26n-seg.yaml", ch=3, nc=None, verbose=True, na=None):
         """Initialize Ultralytics YOLO segmentation model with given config and parameters.
 
         Args:
@@ -660,16 +670,14 @@ class SegmentationModel(DetectionModel):
             ch (int): Number of input channels.
             nc (int, optional): Number of classes.
             verbose (bool): Whether to display model information.
+            na (int, optional): Number of per-instance attributes for attribute heads.
         """
-        super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
+        super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose, na=na)
 
     def init_criterion(self):
         """Initialize the loss criterion for the SegmentationModel."""
-        return (
-            E2ELoss(self, v8SegmentationLoss)
-            if getattr(self.model[-1], "one2one_cv2", None) is not None
-            else v8SegmentationLoss(self)
-        )
+        loss = v8SegmentAttrLoss if isinstance(self.model[-1], (SegmentAttr, Segment26Attr)) else v8SegmentationLoss
+        return E2ELoss(self, loss) if getattr(self.model[-1], "one2one_cv2", None) is not None else loss(self)
 
 
 class SemanticSegmentationModel(BaseModel):
@@ -2011,7 +2019,7 @@ def parse_model(d, ch, verbose=True):
     legacy = True  # backward compatibility for v3/v5/v8/v9 models
     max_channels = float("inf")
     nc, act, scales, end2end = (d.get(x) for x in ("nc", "activation", "scales", "end2end"))
-    reg_max = d.get("reg_max", 16)
+    reg_max, na = d.get("reg_max", 16), d.get("na", 1)
     depth, width, kpt_shape = (d.get(x, 1.0) for x in ("depth_multiple", "width_multiple", "kpt_shape"))
     scale = d.get("scale")
     if scales:
@@ -2150,10 +2158,13 @@ def parse_model(d, ch, verbose=True):
         elif m in frozenset(
             {
                 Detect,
+                DetectAttr,
                 WorldDetect,
                 YOLOEDetect,
                 Segment,
                 Segment26,
+                SegmentAttr,
+                Segment26Attr,
                 YOLOESegment,
                 YOLOESegment26,
                 Pose,
@@ -2163,9 +2174,9 @@ def parse_model(d, ch, verbose=True):
             }
         ):
             args.extend([reg_max, end2end, [ch[x] for x in f]])
-            if m is Segment or m is YOLOESegment or m is Segment26 or m is YOLOESegment26:
+            if m in {Segment, YOLOESegment, Segment26, YOLOESegment26, SegmentAttr, Segment26Attr}:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
-            if m in {Detect, YOLOEDetect, Segment, Segment26, YOLOESegment, YOLOESegment26, Pose, Pose26, OBB, OBB26}:
+            if m is not WorldDetect:
                 m.legacy = legacy
         elif m is Depth:
             args = [*args[:1], [ch[x] for x in f]]  # c_mid, ch tuple; drops the legacy mode arg old checkpoints store

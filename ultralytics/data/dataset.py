@@ -162,7 +162,8 @@ class YOLODataset(BaseDataset):
         Returns:
             (str): Dataset cache hash.
         """
-        return get_hash(self.label_files + self.im_files)
+        na = len(self.data.get("attributes") or [])
+        return get_hash(self.label_files + self.im_files) + (f"-na{na}" if na else "")
 
     def scan_summary(self, nf: int, nm: int, ne: int, nc: int) -> str:
         """Return a one-line summary of scan counters for progress bars and cache logs.
@@ -199,6 +200,7 @@ class YOLODataset(BaseDataset):
             repeat(nkpt),
             repeat(ndim),
             repeat(self.single_cls),
+            repeat(len(self.data.get("attributes") or [])),
         )
 
     def result_to_label(self, result: list) -> tuple[dict | None, int, int, int, int, str]:
@@ -210,7 +212,7 @@ class YOLODataset(BaseDataset):
         Returns:
             (tuple): (label dict or None, missing, found, empty, corrupt, message).
         """
-        im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, nc_f, msg = result
+        im_file, lb, shape, segments, keypoint, attributes, nm_f, nf_f, ne_f, nc_f, msg = result
         label = (
             {
                 "im_file": im_file,
@@ -225,6 +227,8 @@ class YOLODataset(BaseDataset):
             if im_file
             else None
         )
+        if label and attributes.shape[1]:
+            label["attributes"] = attributes  # n, na
         return label, nm_f, nf_f, ne_f, nc_f, msg
 
     def verify_labels(self, labels: list[dict], cache_path: Path) -> None:
@@ -425,7 +429,7 @@ class YOLODataset(BaseDataset):
                 value = torch.stack(value, 0)
             elif k == "visuals":
                 value = torch.nn.utils.rnn.pad_sequence(value, batch_first=True)
-            if k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb"}:
+            if k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb", "attributes"}:
                 value = torch.cat(value, 0)
             new_batch[k] = value
         if "batch_idx" in new_batch:

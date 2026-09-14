@@ -58,6 +58,8 @@ DATASET_KEY_TYPES = {  # dataset YAML keys and their permitted types
     "names": (list, dict),
     "kpt_shape": (list,),
     "flip_idx": (list,),
+    "attributes": (list, dict),
+    "attr_classes": (dict,),
 }
 
 DEPTH_PNG_SCALE = 1000  # uint16 millimeters by default; zero is invalid
@@ -327,10 +329,11 @@ def verify_image_mask(args: tuple) -> tuple:
 
 
 def verify_image_label(args: tuple) -> list:
-    """Verify one image-label pair."""
-    im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim, single_cls = args
+    """Verify one image-label pair, where each label row may end with `na` attribute values in {-1, 0, 1}."""
+    im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim, single_cls, na = args
     # Number (missing, found, empty, corrupt), message, segments, keypoints
     nm, nf, ne, nc, msg, segments, keypoints = 0, 0, 0, 0, "", [], None
+    attributes = np.zeros((0, na), dtype=np.float32)
     try:
         # Verify images
         msg, shape = check_image(im_file)
@@ -341,6 +344,11 @@ def verify_image_label(args: tuple) -> list:
             nf = 1  # label found
             with open(lb_file, encoding="utf-8") as f:
                 lb = [x.split() for x in f.read().strip().splitlines() if len(x)]
+                if na and lb:  # strip trailing attribute columns before box/segment parsing
+                    assert all(len(x) > na + 4 for x in lb), f"labels require {na} trailing attribute columns"
+                    attributes = np.array([x[-na:] for x in lb], dtype=np.float32)
+                    assert np.isin(attributes, (-1, 0, 1)).all(), "attribute values must be -1, 0 or 1"
+                    lb = [x[:-na] for x in lb]
                 if any(len(x) > 6 for x in lb) and (not keypoint):  # is segment
                     assert not any(len(x) == 5 for x in lb), "labels mix segment and detection rows"
                     classes = np.array([x[0] for x in lb], dtype=np.float32)
@@ -369,6 +377,8 @@ def verify_image_label(args: tuple) -> list:
                     lb = lb[i]  # remove duplicates
                     if segments:
                         segments = [segments[x] for x in i]
+                    if na:
+                        attributes = attributes[i]
                     msg = f"{prefix}{im_file}: {nl - len(i)} duplicate labels removed"
             else:
                 ne = 1  # label empty
@@ -382,11 +392,11 @@ def verify_image_label(args: tuple) -> list:
                 kpt_mask = np.where((keypoints[..., 0] < 0) | (keypoints[..., 1] < 0), 0.0, 1.0).astype(np.float32)
                 keypoints = np.concatenate([keypoints, kpt_mask[..., None]], axis=-1)  # (nl, nkpt, 3)
         lb = lb[:, :5]
-        return im_file, lb, shape, segments, keypoints, nm, nf, ne, nc, msg
+        return im_file, lb, shape, segments, keypoints, attributes, nm, nf, ne, nc, msg
     except Exception as e:
         nc = 1
         msg = f"{prefix}{im_file}: ignoring corrupt image/label: {e}"
-        return [None, None, None, None, None, nm, nf, ne, nc, msg]
+        return [None, None, None, None, None, None, nm, nf, ne, nc, msg]
 
 
 def visualize_image_annotations(image_path: str, txt_path: str, label_map: dict[int, str]):
@@ -618,6 +628,17 @@ def check_det_dataset(dataset: str, autodownload: bool = True, split: str = "") 
 
     data["names"] = check_class_names(data["names"])
     data["channels"] = data.get("channels", 3)  # get image channels, default to 3
+    if data.get("attributes"):  # per-box attributes, optionally restricted to some classes via 'attr_classes'
+        data["attributes"] = list(check_class_names(data["attributes"]).values())
+        class_ids = {v: k for k, v in data["names"].items()}
+        data["attr_mask"] = [[1] * len(data["attributes"]) for _ in range(data["nc"])]  # (nc, na) applicability
+        for attr, classes in (data.get("attr_classes") or {}).items():
+            ids = [class_ids.get(c, c) for c in classes]
+            if attr not in data["attributes"] or any(c not in data["names"] for c in ids):
+                raise SyntaxError(emojis(f"{dataset} 'attr_classes: {attr}: {classes}' has unknown attribute/class ❌"))
+            k = data["attributes"].index(attr)
+            for c in data["names"]:
+                data["attr_mask"][c][k] = int(c in ids)
 
     # Resolve paths
     path = Path(extract_dir or data.get("path") or Path(data.get("yaml_file", "")).parent)  # dataset root

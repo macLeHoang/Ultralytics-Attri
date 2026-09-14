@@ -961,6 +961,8 @@ class Exporter:
             self.metadata["kpt_shape"] = model.model[-1].kpt_shape
             if hasattr(model, "kpt_names"):
                 self.metadata["kpt_names"] = model.kpt_names
+        if hasattr(model, "attributes"):  # per-box attribute probabilities are the last len(attributes) output channels
+            self.metadata["attributes"], self.metadata["attr_mask"] = model.attributes, model.attr_mask
 
         LOGGER.info(
             f"\n{colorstr('PyTorch:')} starting from '{file}' with input shape {tuple(im.shape)} BCHW and "
